@@ -10,12 +10,15 @@ class DFSAutonomous(Node):
     def __init__(self):
         super().__init__('dfs_autonomous')
         
+        # Ensure the node uses simulation time (important for synchronization with Gazebo)
         if not self.has_parameter('use_sim_time'):
             self.declare_parameter('use_sim_time', True)
 
+        # Publishers and Subscribers
         self.cmd_pub = self.create_publisher(TwistStamped, '/cmd_vel', 10)
         self.odom_sub = self.create_subscription(Odometry, '/odom', self.odom_callback, 10)
         
+        # QoS setup for LiDAR: Best Effort is standard for simulation sensors
         qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST,
@@ -23,60 +26,73 @@ class DFSAutonomous(Node):
         )
         self.scan_sub = self.create_subscription(LaserScan, '/scan', self.scan_callback, qos)
 
-        # Logical State
-        self.visited = set()
-        self.stack = []  
+        # DFS Logical State Variables
+        self.visited = set()       # Stores grid coordinates (x, y) already explored
+        self.stack = []            # Stack for backtracking in Depth-First Search
         self.target_cell = (0.0, 0.0)
-        self.state = "SELECT_NEXT" 
-        self.limit = 2  
+        self.state = "SELECT_NEXT" # Initial state for the Finite State Machine
+        self.limit = 2             # Grid boundary (±2 meters)
         
-        # Movement Variables
+        # Navigation/Movement Variables
         self.current_x, self.current_y, self.yaw = 0.0, 0.0, 0.0
-        self.home_x, self.home_y = None, None
+        self.home_x, self.home_y = None, None  # Used to zero out the starting position
         self.target_yaw = 0.0
-        self.latest_distance = 10.0
-        self.wait_until = 0.0
+        self.latest_distance = 10.0            # Default distance if nothing is detected
+        self.wait_until = 0.0                  # Timer for non-blocking pauses
 
+        # Main control loop running at 20Hz (every 0.05 seconds)
         self.timer = self.create_timer(0.05, self.control_loop)
         self.get_logger().info("start of Node")
 
     def scan_callback(self, msg):
-        # Look at the front 180 degrees
+        """Processes LiDAR data to find the nearest object in front of the robot."""
+        # Calculate indices for the front 180 degrees (90 degrees left to 90 degrees right)
         half_samples = len(msg.ranges) // 4
         front_arc = msg.ranges[-half_samples:] + msg.ranges[:half_samples]
         
+        # Filter for valid readings (ignore zero self-hits and infinity)
         valid_ranges = [r for r in front_arc if 0.12 < r < msg.range_max]
         if valid_ranges:
             current_min = min(valid_ranges)
+            # Retain the closest distance seen to prevent flickering
             if current_min < self.latest_distance:
                 self.latest_distance = current_min
 
     def odom_callback(self, msg):
+        """Updates the robot's current position and orientation (Yaw) from Odometry."""
         rx, ry = msg.pose.pose.position.x, msg.pose.pose.position.y
+        
+        # Set the 'home' position on the first received message
         if self.home_x is None: 
             self.home_x, self.home_y = rx, ry
+            
+        # Offset coordinates so robot starts at (0,0) relative to its spawn
         self.current_x, self.current_y = rx - self.home_x, ry - self.home_y
         
+        # Convert Quaternion orientation to Euler Yaw (rotation around Z-axis)
         q = msg.pose.pose.orientation
         self.yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
 
     def control_loop(self):
+        """Main Finite State Machine for DFS navigation and object detection."""
         now = self.get_clock().now().nanoseconds / 1e9
         
-        # STOP LOGIC
+        # STATE: FINISHED - Kill all movement
         if self.state == "FINISHED":
-            self.cmd_pub.publish(TwistStamped()) # zero velocity
+            self.cmd_pub.publish(TwistStamped()) 
             return
 
-        # 2. DETECTION TRIGGER
+        # OBJECT DETECTION: Trigger if LiDAR finds something within 0.25m
         if self.latest_distance < 0.25:
             self.cmd_pub.publish(TwistStamped()) 
             self.get_logger().info("I found it")
-            self.state = "FINISHED" # Change state to stop all other logic
+            self.state = "FINISHED" 
             return
 
+        # Throttle logging to once every 2 seconds
         self.get_logger().info(f"STATUS: {self.state} | Pos: ({self.current_x:.1f},{self.current_y:.1f})", throttle_duration_sec=2.0)
 
+        # Pause logic (Wait for rotations or stops to settle)
         if now < self.wait_until:
             self.cmd_pub.publish(TwistStamped()) 
             return
@@ -84,32 +100,39 @@ class DFSAutonomous(Node):
         msg = TwistStamped()
         msg.header.stamp = self.get_clock().now().to_msg()
         
+        # Current grid position and distance/angle error to target
         grid_x, grid_y = round(self.current_x), round(self.current_y)
         dx = self.target_cell[0] - self.current_x
         dy = self.target_cell[1] - self.current_y
         dist = math.sqrt(dx**2 + dy**2)
+        # Calculate heading error in degrees
         diff = math.degrees(math.atan2(math.sin(self.target_yaw - self.yaw), math.cos(self.target_yaw - self.yaw)))
 
+        # STATE: SELECT_NEXT - DFS Algorithm logic
         if self.state == "SELECT_NEXT":
             self.visited.add((grid_x, grid_y))
+            # Define neighbors: Down, Up, Left, Right
             neighbors = [(grid_x-1, grid_y), (grid_x+1, grid_y), (grid_x, grid_y+1), (grid_x, grid_y-1)]
             
             found = False
             for n in neighbors:
+                # Check if neighbor is unvisited and within the 2m x 2m limit
                 if n not in self.visited and -self.limit <= n[0] <= self.limit and -self.limit <= n[1] <= self.limit:
-                    self.stack.append((grid_x, grid_y))
+                    self.stack.append((grid_x, grid_y)) # Push current to stack for backtracking
                     self.target_cell = (float(n[0]), float(n[1]))
                     
-                    if n[0] < grid_x: self.target_yaw = math.pi      
-                    elif n[0] > grid_x: self.target_yaw = 0.0        
-                    elif n[1] > grid_y: self.target_yaw = math.pi/2  
-                    else: self.target_yaw = -math.pi/2               
+                    # Set required yaw based on neighbor direction
+                    if n[0] < grid_x: self.target_yaw = math.pi      # Down (-X)
+                    elif n[0] > grid_x: self.target_yaw = 0.0        # Up (+X)
+                    elif n[1] > grid_y: self.target_yaw = math.pi/2  # Left (+Y)
+                    else: self.target_yaw = -math.pi/2               # Right (-Y)
                     
                     self.state = "ALIGN"
-                    self.wait_until = now + 1.5
+                    self.wait_until = now + 1.5 # Pause to stabilize before turning
                     found = True
                     break
             
+            # Backtracking: if no unvisited neighbors, pop from stack
             if not found:
                 if self.stack:
                     self.target_cell = self.stack.pop()
@@ -120,21 +143,25 @@ class DFSAutonomous(Node):
                     self.state = "FINISHED"
                     self.get_logger().info("DFS finished")
 
+        # STATE: ALIGN - Rotate in place to face target_yaw
         elif self.state == "ALIGN":
             if abs(diff) > 0.5:
+                # Proportional-ish speed control for turning
                 speed = 0.35 if abs(diff) > 10.0 else 0.05
                 msg.twist.angular.z = speed if diff > 0 else -speed
             else:
                 self.state = "TRAVEL"
-                self.wait_until = now + 1.0 
+                self.wait_until = now + 1.0 # Pause briefly before moving forward
 
+        # STATE: TRAVEL - Move straight to the target coordinate
         elif self.state == "TRAVEL":
+            # Small angular correction to keep the robot on path
             msg.twist.angular.z = 0.8 * math.radians(diff) 
-            if dist < 0.02:
+            if dist < 0.02: # If target reached (2cm tolerance)
                 self.state = "SELECT_NEXT"
                 self.wait_until = now + 1.5
             else:
-                msg.twist.linear.x = 0.20
+                msg.twist.linear.x = 0.20 # Forward speed
         
         self.cmd_pub.publish(msg)
 
@@ -146,6 +173,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        # Stop the robot on exit
         stop_msg = TwistStamped()
         node.cmd_pub.publish(stop_msg)
         node.destroy_node()
