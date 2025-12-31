@@ -8,6 +8,7 @@ from launch_ros.actions import Node
 def generate_launch_description():
     ros_gz_sim = get_package_share_directory('ros_gz_sim')
     tb3_gazebo = get_package_share_directory('turtlebot3_gazebo')
+    # Make sure this path is correct for your system
     world_path = os.path.expanduser('~/gazebo/worlds/my_world.sdf')
 
     # Gazebo models environment
@@ -24,23 +25,27 @@ def generate_launch_description():
         launch_arguments={'gz_args': f'-r -v2 {world_path}'}.items()
     )
 
-    # 2. bridge
+    # 2. Bridge: Bridging Gazebo Topics to ROS 2
     bridge = Node(
-    package='ros_gz_bridge',
-    executable='parameter_bridge',
-    arguments=[
-        '/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan',
-        '/odom@nav_msgs/msg/Odometry[gz.msgs.Odometry',
-        '/cmd_vel@geometry_msgs/msg/TwistStamped[gz.msgs.Twist',
-        '/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock'
-    ],
-    # Making sure names match exactly
-    remappings=[
-        ('/model/turtlebot3_burger/scan', '/scan'),
-    ],
-    output='screen'
-)
-
+        package='ros_gz_bridge',
+        executable='parameter_bridge',
+        arguments=[
+            '/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan',
+            '/odom@nav_msgs/msg/Odometry[gz.msgs.Odometry',
+            '/cmd_vel@geometry_msgs/msg/TwistStamped[gz.msgs.Twist',
+            '/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock',
+            '/imu@sensor_msgs/msg/Imu[gz.msgs.IMU',
+            '/world/urban_world/model/turtlebot3_waffle/link/camera_link/sensor/camera/image@sensor_msgs/msg/Image[gz.msgs.Image'
+        ],
+        remappings=[
+            ('/model/turtlebot3_waffle/scan', '/scan'),
+            ('/model/turtlebot3_waffle/imu', '/imu'),
+            ('/model/turtlebot3_waffle/odom', '/odom'),
+            ('/model/turtlebot3_waffle/cmd_vel', '/cmd_vel'),
+            ('/world/urban_world/model/turtlebot3_waffle/link/camera_link/sensor/camera/image', '/camera/image_raw'),
+        ],
+        output='screen'
+    )
     # 3. Spawn TurtleBot
     spawn_tb3 = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(

@@ -1,0 +1,178 @@
+import rclpy
+from rclpy.node import Node
+from geometry_msgs.msg import TwistStamped
+from nav_msgs.msg import Odometry
+from sensor_msgs.msg import Imu, LaserScan
+import math
+#pythonRobotics library code
+class DijkstraPlanner:
+    def __init__(self, ox, oy, resolution, rr):
+        self.resolution = resolution
+        self.rr = rr
+        self.min_x, self.min_y = round(min(ox)), round(min(oy))
+        self.max_x, self.max_y = round(max(ox)), round(max(oy))
+        self.x_width = round((self.max_x - self.min_x) / self.resolution)
+        self.y_width = round((self.max_y - self.min_y) / self.resolution)
+        self.obstacle_map = [[False for _ in range(self.y_width)] for _ in range(self.x_width)]
+        self.motion = [[1, 0, 1], [0, 1, 1], [-1, 0, 1], [0, -1, 1]]
+        self.calc_obstacle_map(ox, oy)
+
+    class Node:
+        def __init__(self, x, y, cost, parent_index):
+            self.x, self.y, self.cost, self.parent_index = x, y, cost, parent_index
+
+    def planning(self, sx, sy, gx, gy):
+        start_node = self.Node(self.calc_xy_index(sx, self.min_x), self.calc_xy_index(sy, self.min_y), 0.0, -1)
+        goal_node = self.Node(self.calc_xy_index(gx, self.min_x), self.calc_xy_index(gy, self.min_y), 0.0, -1)
+        open_set, closed_set = {self.calc_grid_index(start_node): start_node}, {}
+        while open_set:
+            c_id = min(open_set, key=lambda o: open_set[o].cost)
+            current = open_set[c_id]
+            if current.x == goal_node.x and current.y == goal_node.y:
+                goal_node.parent_index, goal_node.cost = current.parent_index, current.cost
+                break
+            del open_set[c_id]; closed_set[c_id] = current
+            for dx, dy, move_cost in self.motion:
+                node = self.Node(current.x + dx, current.y + dy, current.cost + move_cost, c_id)
+                n_id = self.calc_grid_index(node)
+                if not self.verify_node(node) or n_id in closed_set: continue
+                if n_id not in open_set or open_set[n_id].cost > node.cost: open_set[n_id] = node
+        return self.calc_final_path(goal_node, closed_set)
+
+    def calc_final_path(self, goal_node, closed_set):
+        rx, ry = [self.calc_grid_position(goal_node.x, self.min_x)], [self.calc_grid_position(goal_node.y, self.min_y)]
+        p_idx = goal_node.parent_index
+        while p_idx != -1:
+            n = closed_set[p_idx]; rx.append(self.calc_grid_position(n.x, self.min_x)); ry.append(self.calc_grid_position(n.y, self.min_y))
+            p_idx = n.parent_index
+        return rx[::-1], ry[::-1]
+
+    def calc_grid_position(self, index, min_pos): return index * self.resolution + min_pos
+    def calc_xy_index(self, pos, min_pos): return round((pos - min_pos) / self.resolution)
+    def calc_grid_index(self, node): return (node.y - self.min_y) * self.x_width + (node.x - self.min_x)
+    def verify_node(self, node):
+        if node.x < 0 or node.y < 0 or node.x >= self.x_width or node.y >= self.y_width: return False
+        return not self.obstacle_map[node.x][node.y]
+
+    def calc_obstacle_map(self, ox, oy):
+        for ix in range(self.x_width):
+            x = self.calc_grid_position(ix, self.min_x)
+            for iy in range(self.y_width):
+                y = self.calc_grid_position(iy, self.min_y)
+                for iox, ioy in zip(ox, oy):
+                    if math.hypot(iox - x, ioy - y) <= self.rr: self.obstacle_map[ix][iy] = True; break
+#mainControl
+#adding all the sensors and inputs
+class PreciseCardinalFollower(Node):
+    def __init__(self):
+        super().__init__('precise_cardinal_follower')
+        self.cmd_pub = self.create_publisher(TwistStamped, '/cmd_vel', 10)
+        self.odom_sub = self.create_subscription(Odometry, '/odom', self.odom_callback, 10)
+        self.imu_sub = self.create_subscription(Imu, '/imu', self.imu_callback, 10)
+        self.scan_sub = self.create_subscription(LaserScan, '/scan', self.scan_callback, 10)
+
+        self.final_goal = (-3.0, 3.0)
+        self.resolution = 1.0
+        self.ox, self.oy = [], []
+        for i in range(-5, 6): self.ox.extend([float(i), float(i), -5.0, 5.0]); self.oy.extend([-5.0, 5.0, float(i), float(i)])
+
+        self.state = "PLAN_PATH"
+        self.current_x, self.current_y, self.imu_yaw = 0.0, 0.0, 0.0
+        self.home_x, self.home_y = None, None
+        self.wait_until = 0.0
+        self.latest_distance = 10.0
+        self.path_queue = []
+        
+        self.timer = self.create_timer(0.05, self.control_loop)
+
+    def odom_callback(self, msg):
+        p = msg.pose.pose.position
+        if self.home_x is None: self.home_x, self.home_y = p.x, p.y
+        self.current_x, self.current_y = p.x - self.home_x, p.y - self.home_y
+
+    def imu_callback(self, msg):
+        q = msg.orientation
+        self.imu_yaw = math.atan2(2*(q.w*q.z + q.x*q.y), 1 - 2*(q.y*q.y + q.z*q.z))
+
+    def scan_callback(self, msg):
+        front = msg.ranges[-5:] + msg.ranges[:5] 
+        valid = [r for r in front if 0.1 < r < 4.0]
+        self.latest_distance = min(valid) if valid else 10.0
+
+    def control_loop(self):
+        if self.home_x is None: return
+        now = self.get_clock().now().nanoseconds / 1e9
+        
+        if now < self.wait_until:
+            self.cmd_pub.publish(TwistStamped())
+            return
+
+        msg = TwistStamped()
+#path movement and turning processes, how it decides until when to turn and move
+        if self.state == "PLAN_PATH":
+            planner = DijkstraPlanner(self.ox, self.oy, self.resolution, 0.45)
+            rx, ry = planner.planning(self.current_x, self.current_y, self.final_goal[0], self.final_goal[1])
+            if rx and len(rx) > 1: 
+                self.path_queue = list(zip(rx[1:], ry[1:]))
+                self.state = "NEXT_WAYPOINT"
+
+        elif self.state == "NEXT_WAYPOINT":
+            if not self.path_queue: self.state = "TERMINATE"; return
+            self.target_cell = self.path_queue.pop(0)
+            raw_yaw = math.atan2(self.target_cell[1]-self.current_y, self.target_cell[0]-self.current_x)
+            self.target_yaw = round(raw_yaw / (math.pi/2)) * (math.pi/2)
+            self.state = "ALIGN_FAST"
+
+        elif self.state == "ALIGN_FAST":
+            diff = math.atan2(math.sin(self.target_yaw - self.imu_yaw), math.cos(self.target_yaw - self.imu_yaw))
+            abs_deg = abs(math.degrees(diff))
+            
+            if abs_deg < 10.0: # Reached the 80-degree mark
+                self.get_logger().info("Fast Turn done. Braking for precision stage.")
+                self.execute_stop(now, "ALIGN_SLOW", 0.4) # Pause to kill speed
+            else:
+                msg.twist.angular.z = 0.6 if diff > 0 else -0.6
+                self.cmd_pub.publish(msg)
+
+        elif self.state == "ALIGN_SLOW":
+            diff = math.atan2(math.sin(self.target_yaw - self.imu_yaw), math.cos(self.target_yaw - self.imu_yaw))
+            abs_deg = abs(math.degrees(diff))
+            
+            if abs_deg < 0.6: 
+                self.get_logger().info("Aligned perfectly. Pausing.")
+                self.execute_stop(now, "PEEK", 1.0)
+            else:
+                msg.twist.angular.z = 0.12 if diff > 0 else -0.12 # Slow crawl
+                self.cmd_pub.publish(msg)
+
+        elif self.state == "PEEK":
+            is_box = (self.target_cell[0] == self.final_goal[0] and self.target_cell[1] == self.final_goal[1])
+            if self.latest_distance < 1.15 and not is_box:
+                self.ox.append(self.target_cell[0]); self.oy.append(self.target_cell[1])
+                self.execute_stop(now, "PLAN_PATH", 0.5)
+            else:
+                self.anchor_x, self.anchor_y = self.current_x, self.current_y
+                self.state = "TRAVEL"
+
+        elif self.state == "TRAVEL":
+            dist = math.hypot(self.current_x - self.anchor_x, self.current_y - self.anchor_y)
+            if dist >= 1.0:
+                self.execute_stop(now, "NEXT_WAYPOINT", 0.6)
+            else:
+                msg.twist.linear.x = 0.2
+                msg.twist.angular.z = 0.0 
+                self.cmd_pub.publish(msg)
+
+        elif self.state == "TERMINATE":
+            self.cmd_pub.publish(TwistStamped())
+            rclpy.shutdown()
+
+    def execute_stop(self, now, next_state, duration):
+        self.wait_until = now + duration
+        self.state = next_state
+        for _ in range(5): self.cmd_pub.publish(TwistStamped())
+
+def main():
+    rclpy.init(); rclpy.spin(PreciseCardinalFollower())
+
+if __name__ == '__main__': main()
