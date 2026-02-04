@@ -1,6 +1,6 @@
 # DFS and Dijkstra-Gazebo and Ros2
 <img width="612" height="408" alt="image" src="https://github.com/user-attachments/assets/3a2a48af-1678-4a19-8e59-1ddd16402b3d" />
-
+\\
 
 This repository contains the artifacts that you can use to setup the turtle bot robot simulation and run it with ROS2/Gazebo.
 It showcases the robot pathfinding in ROS2/Gazebo simulation environment using TurtleBot.
