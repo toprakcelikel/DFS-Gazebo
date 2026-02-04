@@ -1,5 +1,8 @@
 # DFS and Dijkstra-Gazebo and Ros2
 <img width="612" height="408" alt="image" src="https://github.com/user-attachments/assets/3a2a48af-1678-4a19-8e59-1ddd16402b3d" />
+This repository contains the artifacts that you can use to setup the turtle bot robot simulation and run it with ROS2/Gazebo.
+It showcases the robot pathfinding in ROS2/Gazebo simulation environment using TurtleBot.
+It features obstacle avoidance, lidar, noise and also pathfinding that can easily be replaced by different algorithms from the open source PythonRobotics library: https://atsushisakai.github.io/PythonRobotics/
 
 I began by using the depth first search algorithm to allow the robot to find the target. The algorithm involves going as deep as possible in one direction before going back when reaching a dead end, going to another direction next. It follows this process until reaching the objective.
 
@@ -10,3 +13,14 @@ After achieving using the DFS algorithm, I attempted to find a way to decrease t
 The main three files I used to execute the integration was an sdf file, the algorithm file, and the turtlebot/environment generation file. The sdf file included the geometry of the environment and the specific objects, which formed the layout for the robot. The turtlebot/environment generation file being seperate was for ease of comprehension. 
 
 I organized the algorithm file in such a way that I could effectively swap the DFS algorithm for the Dijkstra's algorithm by importing the main logic, helping make sure I didn't change any other parameters other than the algorithm itself.
+
+Environment Setup Instructions
+Follow this to install Gazebo harmonic in Ubuntu Jammy
+https://gazebosim.org/docs/harmonic/install_ubuntu/
+
+Install ROS 2 Jazzy:
+https://docs.ros.org/en/jazzy/Installation.html
+
+Install TurtleBot:
+sudo apt update
+sudo apt install ros-jazzy-turtlebot3-gazebo
